@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"io/ioutil"
@@ -21,14 +23,16 @@ const (
 )
 
 type compilerJob struct {
-	Source       []byte      // source code of program to compile
-	SourceHash   string      // sha256 of source (in hex form)
-	Filename     string      // cache file path
-	Compiler     string      // compiler to use for this job
-	Target       string      // target board name, or "wasm"
-	Format       string      // output format: "wasm", "hex", etc.
-	ResultFile   chan string // filename on completion
-	ResultErrors chan []byte // errors on completion
+	Source       []byte         // source code of program to compile
+	SourceHash   string         // sha256 of source (in hex form)
+	Filename     string         // cache file path
+	Compiler     string         // compiler to use for this job
+	Target       string         // target board name, or "wasm"
+	Format       string         // output format: "wasm", "hex", "wat", "asm-avx2", etc.
+	SIMD         bool           // whether to pass -simd=true or -simd=false to tinygo
+	Symbols      []string       // function symbols to extract for asm-avx2; empty = whole .text
+	ResultFile   chan string     // filename on completion
+	ResultErrors chan []byte     // errors on completion
 	Context      context.Context
 }
 
@@ -113,6 +117,10 @@ func (job compilerJob) Run() error {
 	for _, fn := range []string{"go.mod", "go.sum"} {
 		data, err := os.ReadFile("tinygo-template/" + fn)
 		if err != nil {
+			// go.sum may not exist (minimal go.mod with no deps).
+			if fn == "go.sum" {
+				continue
+			}
 			return err
 		}
 		err = os.WriteFile(tmpdir+"/"+fn, data, 0o666)
@@ -131,6 +139,11 @@ func (job compilerJob) Run() error {
 		return err
 	}
 
+	simdFlag := "-simd=false"
+	if job.SIMD {
+		simdFlag = "-simd=true"
+	}
+
 	var cmd *exec.Cmd
 	env := []string{"GOPROXY=off"} // don't download dependencies
 	switch job.Compiler {
@@ -140,9 +153,109 @@ func (job compilerJob) Run() error {
 	case "tinygo":
 		switch job.Format {
 		case "wasm", "wasi":
-			// simulate
+			// Run code in the browser / WASI.
 			tag := strings.Replace(job.Target, "-", "_", -1) // '-' not allowed in tags, use '_' instead
-			cmd = exec.Command("tinygo", "build", "-json", "-o", tmpfile, "-target", job.Format, "-tags", tag, "-no-debug", infile.Name())
+			cmd = exec.Command("tinygo", "build", "-json", "-o", tmpfile, "-target", job.Format, "-tags", tag, "-no-debug", simdFlag, infile.Name())
+		case "wat":
+			// Produce WebAssembly text format by building wasm then running wasm2wat.
+			// The intermediate wasm lands in a sibling tmp file.
+			wasmTmp := tmpfile + ".wasm"
+			defer os.Remove(wasmTmp)
+			tag := strings.ReplaceAll(job.Target, "-", "_")
+			buildCmd := exec.CommandContext(job.Context, "tinygo", "build", "-json", "-o", wasmTmp, "-target", "wasi", "-tags", tag, "-no-debug", simdFlag, infile.Name())
+			buildCmd.Dir = filepath.Dir(infile.Name())
+			buildBuf := &bytes.Buffer{}
+			buildCmd.Stdout = buildBuf
+			buildCmd.Stderr = buildBuf
+			buildCmd.Env = append(os.Environ(), env...)
+			if err := buildCmd.Run(); err != nil {
+				if buildBuf.Len() == 0 {
+					buildBuf.WriteString(err.Error())
+				}
+				job.ResultErrors <- stripFilename(buildBuf.Bytes(), infile.Name())
+				return nil
+			}
+			// Convert wasm to wat.
+			watCmd := exec.CommandContext(job.Context, "wasm2wat", wasmTmp, "-o", tmpfile)
+			watBuf := &bytes.Buffer{}
+			watCmd.Stderr = watBuf
+			if err := watCmd.Run(); err != nil {
+				if watBuf.Len() == 0 {
+					watBuf.WriteString(err.Error())
+				}
+				job.ResultErrors <- watBuf.Bytes()
+				return nil
+			}
+			if err := os.Rename(tmpfile, job.Filename); err != nil {
+				job.ResultErrors <- []byte(err.Error())
+				return nil
+			}
+			job.ResultFile <- job.Filename
+			if cacheType == cacheTypeGCS {
+				uploadToGCS(job)
+			}
+			return nil
+		case "asm-avx2":
+			// Build a native ELF with AVX2 features, then disassemble with objdump.
+			elfTmp := tmpfile + ".elf"
+			defer os.Remove(elfTmp)
+			// Reference: test/e2e/spmd-benchmark-x86.sh uses these exact features.
+			buildCmd := exec.CommandContext(job.Context, "tinygo", "build", "-json", "-o", elfTmp,
+				"-llvm-features=+ssse3,+sse4.2,+avx2", simdFlag, infile.Name())
+			buildCmd.Dir = filepath.Dir(infile.Name())
+			buildBuf := &bytes.Buffer{}
+			buildCmd.Stdout = buildBuf
+			buildCmd.Stderr = buildBuf
+			buildCmd.Env = append(os.Environ(), env...)
+			if err := buildCmd.Run(); err != nil {
+				if buildBuf.Len() == 0 {
+					buildBuf.WriteString(err.Error())
+				}
+				job.ResultErrors <- stripFilename(buildBuf.Bytes(), infile.Name())
+				return nil
+			}
+			// Disassemble: per-symbol or whole .text.
+			asmBuf := &bytes.Buffer{}
+			if len(job.Symbols) == 0 {
+				objCmd := exec.CommandContext(job.Context, "objdump", "-d", "-M", "intel", "--no-show-raw-insn", elfTmp)
+				objCmd.Stdout = asmBuf
+				objCmd.Stderr = asmBuf
+				if err := objCmd.Run(); err != nil {
+					job.ResultErrors <- asmBuf.Bytes()
+					return nil
+				}
+			} else {
+				for i, sym := range job.Symbols {
+					if i > 0 {
+						asmBuf.WriteString("\n")
+					}
+					asmBuf.WriteString("// ===== " + sym + " =====\n")
+					objCmd := exec.CommandContext(job.Context, "objdump", "-d", "-M", "intel", "--no-show-raw-insn",
+						"--disassemble="+sym, elfTmp)
+					symBuf := &bytes.Buffer{}
+					objCmd.Stdout = symBuf
+					objCmd.Stderr = symBuf
+					if err := objCmd.Run(); err != nil {
+						// If a symbol is missing, include the error as a comment rather than failing.
+						asmBuf.WriteString("// (symbol not found: " + err.Error() + ")\n")
+					} else {
+						asmBuf.Write(symBuf.Bytes())
+					}
+				}
+			}
+			// Write combined disassembly to cache file.
+			if err := os.WriteFile(tmpfile, asmBuf.Bytes(), 0o666); err != nil {
+				return err
+			}
+			if err := os.Rename(tmpfile, job.Filename); err != nil {
+				job.ResultErrors <- []byte(err.Error())
+				return nil
+			}
+			job.ResultFile <- job.Filename
+			if cacheType == cacheTypeGCS {
+				uploadToGCS(job)
+			}
+			return nil
 		default:
 			// build firmware
 			cmd = exec.Command("tinygo", "build", "-json", "-o", tmpfile, "-target", job.Target, infile.Name())
@@ -174,22 +287,7 @@ func (job compilerJob) Run() error {
 		// Now copy the file over to cloud storage to cache across all
 		// instances.
 		if cacheType == cacheTypeGCS {
-			obj := bucket.Object(outfileName)
-			w := obj.NewWriter(job.Context)
-			r, err := os.Open(job.Filename)
-			if err != nil {
-				log.Println(err.Error())
-				return
-			}
-			defer r.Close()
-			if _, err := io.Copy(w, r); err != nil {
-				log.Println(err.Error())
-				return
-			}
-			if err := w.Close(); err != nil {
-				log.Println(err.Error())
-				return
-			}
+			uploadToGCS(job)
 		}
 
 		// Done. Return the local file immediately.
@@ -203,6 +301,28 @@ func (job compilerJob) Run() error {
 		cmd.Process.Kill()
 	}
 	return nil
+}
+
+// uploadToGCS uploads the compiled result to Google Cloud Storage.
+// Errors are logged but not fatal — the local cache still has the file.
+func uploadToGCS(job compilerJob) {
+	outfileName := filepath.Base(job.Filename)
+	obj := bucket.Object(outfileName)
+	w := obj.NewWriter(job.Context)
+	r, err := os.Open(job.Filename)
+	if err != nil {
+		log.Println(err.Error())
+		return
+	}
+	defer r.Close()
+	if _, err := io.Copy(w, r); err != nil {
+		log.Println(err.Error())
+		return
+	}
+	if err := w.Close(); err != nil {
+		log.Println(err.Error())
+		return
+	}
 }
 
 // cleanupCompileCache is called regularly to clean up old compile results from
@@ -256,4 +376,22 @@ func stripFilename(buf []byte, filename string) []byte {
 		buf = buf[len(prefix):]
 	}
 	return buf
+}
+
+// cacheFilename builds the local cache file path for a compile job.
+// The SIMD flag and sorted symbols list are included so independent variants
+// cache independently and never collide on the same source.
+func cacheFilename(compiler, target, sourceHash, format string, simd bool, symbols []string) string {
+	simdSuffix := "simdfalse"
+	if simd {
+		simdSuffix = "simdtrue"
+	}
+	symSuffix := ""
+	if len(symbols) > 0 {
+		sorted := append([]string(nil), symbols...)
+		sort.Strings(sorted)
+		h := sha256.Sum256([]byte(strings.Join(sorted, ",")))
+		symSuffix = "-" + hex.EncodeToString(h[:8])
+	}
+	return filepath.Join(cacheDir, "build-"+compiler+"-"+target+"-"+sourceHash+"-"+simdSuffix+symSuffix+"."+format)
 }
