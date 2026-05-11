@@ -1,158 +1,143 @@
-/* Make Bootstrap automatically switch dark/light theme based on the dark mode
- * setting of the OS/browser.
- * See: https://github.com/twbs/bootstrap/issues/37973#issuecomment-1987272883
- */
-@media (prefers-color-scheme: dark) {
-  /* These values were copied directly from dev tools. */
-  :root {
-    color-scheme: dark;
-    --bs-body-color: #dee2e6;
-    --bs-body-color-rgb: 222,226,230;
-    --bs-body-bg: #212529;
-    --bs-body-bg-rgb: 33,37,41;
-    --bs-emphasis-color: #fff;
-    --bs-emphasis-color-rgb: 255,255,255;
-    --bs-secondary-color: rgba(222, 226, 230, 0.75);
-    --bs-secondary-color-rgb: 222,226,230;
-    --bs-secondary-bg: #343a40;
-    --bs-secondary-bg-rgb: 52,58,64;
-    --bs-tertiary-color: rgba(222, 226, 230, 0.5);
-    --bs-tertiary-color-rgb: 222,226,230;
-    --bs-tertiary-bg: #2b3035;
-    --bs-tertiary-bg-rgb: 43,48,53;
-    --bs-primary-text-emphasis: #6ea8fe;
-    --bs-secondary-text-emphasis: #a7acb1;
-    --bs-success-text-emphasis: #75b798;
-    --bs-info-text-emphasis: #6edff6;
-    --bs-warning-text-emphasis: #ffda6a;
-    --bs-danger-text-emphasis: #ea868f;
-    --bs-light-text-emphasis: #f8f9fa;
-    --bs-dark-text-emphasis: #dee2e6;
-    --bs-primary-bg-subtle: #031633;
-    --bs-secondary-bg-subtle: #161719;
-    --bs-success-bg-subtle: #051b11;
-    --bs-info-bg-subtle: #032830;
-    --bs-warning-bg-subtle: #332701;
-    --bs-danger-bg-subtle: #2c0b0e;
-    --bs-light-bg-subtle: #343a40;
-    --bs-dark-bg-subtle: #1a1d20;
-    --bs-primary-border-subtle: #084298;
-    --bs-secondary-border-subtle: #41464b;
-    --bs-success-border-subtle: #0f5132;
-    --bs-info-border-subtle: #087990;
-    --bs-warning-border-subtle: #997404;
-    --bs-danger-border-subtle: #842029;
-    --bs-light-border-subtle: #495057;
-    --bs-dark-border-subtle: #343a40;
-    --bs-heading-color: inherit;
-    --bs-link-color: #6ea8fe;
-    --bs-link-hover-color: #8bb9fe;
-    --bs-link-color-rgb: 110,168,254;
-    --bs-link-hover-color-rgb: 139,185,254;
-    --bs-code-color: #e685b5;
-    --bs-highlight-color: #dee2e6;
-    --bs-highlight-bg: #664d03;
-    --bs-border-color: #495057;
-    --bs-border-color-translucent: rgba(255, 255, 255, 0.15);
-    --bs-form-valid-color: #75b798;
-    --bs-form-valid-border-color: #75b798;
-    --bs-form-invalid-color: #ea868f;
-    --bs-form-invalid-border-color: #ea868f;
-  }
-  .btn-close {
-    filter: var(--bs-btn-close-white-filter);
-  }
+/* SPMD Playground - dashboard styles */
+
+html, body {
+  height: 100%;
+  margin: 0;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
 }
-
-
-/* scaffolding */
-:root {
-	font-family: sans-serif;
-}
-
-/* layout */
-
-html,
-body {
-	margin: 0;
-	padding: 0;
-	height: 100%;
-}
-
-header {
-	display: flex;
-	align-items: center;
-	border-bottom: 1px solid var(--vscode-panel-border);
-	background: var(--vscode-panel-background);
-}
-
 
 body {
-	display: flex;
-	flex-direction: column;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
+
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  background: #252526;
+  border-bottom: 1px solid #333;
+  height: 3rem;
+  flex: 0 0 3rem;
+  box-sizing: border-box;
+}
+
+#topbar h1 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0;
+  color: #fff;
+  white-space: nowrap;
+}
+
+#topbar .simd-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+  user-select: none;
+  color: #ddd;
+}
+
+#topbar .simd-toggle input { margin: 0; }
 
 #middle {
-	flex-shrink: 0;
-	flex-grow: 1;
-	display: flex;
-	flex-direction: column;
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
 }
 
 #editor {
-	flex: 1 0 0;
-	overflow: auto;
-	display: flex;
-	font-size: 14px;
-}
-#editor > .cm-editor {
-	background-color: var(--vscode-editor-background);
-	flex: 1 0 0;
-}
-#editor .cm-gutters {
-	background-color: inherit;
+  flex: 1 1 50%;
+  min-width: 0;
+  border-right: 1px solid #333;
+  overflow: hidden;
 }
 
-.schematic {
-	border-top: 1px solid var(--vscode-panel-border);
+#editor .cm-editor {
+  height: 100%;
 }
 
-body:not(.vscode) .simulator {
-    border-left: 1px solid var(--vscode-panel-border);
+#right-pane {
+  flex: 1 1 50%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
 }
 
-@media screen and (min-width: 800px) {
-	#middle {
-		flex-direction: row;
-		overflow: hidden;
-		flex-basis: 0;
-	}
-	.schematic {
-		border-top: none;
-	}
-	#output {
-		flex: 1 0 0;
-	}
+#tabbar {
+  display: flex;
+  background: #252526;
+  border-bottom: 1px solid #333;
+  flex: 0 0 auto;
 }
 
-/* header */
-
-header h1 {
-	margin: 8px;
-	font-size: 1.3rem;
+#tabbar .tab {
+  background: transparent;
+  color: #999;
+  border: none;
+  padding: 0.5rem 1rem;
+  font-size: 0.9rem;
+  cursor: pointer;
+  border-right: 1px solid #333;
 }
 
-header > *:not(h1) {
-	margin: 4px 4px 4px 0;
+#tabbar .tab:hover { color: #fff; }
+
+#tabbar .tab.active {
+  background: #1e1e1e;
+  color: #fff;
+  border-bottom: 2px solid #82aaff;
 }
 
-#target .project-name {
-	display: flex;
-	justify-content: space-between;
+#output-pane {
+  flex: 1 1 auto;
+  margin: 0;
+  padding: 0.75rem 1rem;
+  overflow: auto;
+  background: #1e1e1e;
+  color: #d4d4d4;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  white-space: pre;
+  min-height: 0;
 }
-#target .project-name .buttons {
-	margin-left: 16px;
+
+#output-pane code {
+  font-family: inherit;
+  color: inherit;
+  background: transparent;
+  white-space: pre;
 }
-.edit-symbol {
-	transform: scaleX(-1);
+
+#hint {
+  flex: 0 0 auto;
+  padding: 0.5rem 1rem;
+  background: #252526;
+  border-top: 1px solid #333;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.8rem;
+  color: #aaa;
+  min-height: 1.6rem;
+}
+
+/* Highlighter spans applied via classes (no inline style attrs). */
+.hi-tier1 {
+  color: #82aaff; /* subtle blue */
+}
+
+.hi-tier2 {
+  color: #ffcb6b; /* bright amber */
+  font-weight: bold;
+}
+
+.hi-banner {
+  color: #f78c6c;
+  font-weight: bold;
 }

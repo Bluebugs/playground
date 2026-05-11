@@ -1,14 +1,11 @@
 <!DOCTYPE html>
-
 <html lang="en">
   <head>
-    <title>TinyGo Playground</title>
+    <title>SPMD Playground</title>
     <meta charset="utf-8"/>
     <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"/>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; worker-src 'self' blob:; connect-src 'self';"/>
     <link rel="stylesheet" href="resources/bootstrap-5.3.3.min.css">
-    <link rel="stylesheet" href="simulator.css"/>
-    <link rel="stylesheet" href="simulator-vscode.css"/>
     <link rel="stylesheet" href="dashboard.css"/>
     <link rel="icon" type="image/png" href="resources/favicon-32x32.png" sizes="32x32"/>
     <script type="module" src="dashboard.js"></script>
@@ -16,118 +13,31 @@
     <link rel="modulepreload" href="resources/editor.bundle.min.js"/>
   </head>
   <body>
-    <header>
-      <h1>TinyGo Playground</h1>
-      <div id="target" class="btn-group">
+    <header id="topbar">
+      <h1>SPMD Playground</h1>
+      <div id="example-picker" class="btn-group">
         <button type="button" class="btn btn-primary dropdown-toggle" data-bs-toggle="dropdown" aria-haspopup="true" aria-expanded="false">
-          Console (TinyGo)
+          <span id="example-label">Loading…</span>
         </button>
-        <div class="dropdown-menu">
-          <a class="dropdown-item active" href>Console (TinyGo)</a>
-          <span id="target-loading" class="dropdown-item disabled">Loading...</span>
-        </div>
+        <div id="example-menu" class="dropdown-menu"></div>
       </div>
-      <button type="button" id="btn-flash" class="btn btn-secondary" disabled>Flash</button>
-      <button type="button" id="btn-about" class="btn btn-secondary" data-bs-toggle="modal" data-bs-target="#aboutModal">About</button>
+      <label class="simd-toggle">
+        <input type="checkbox" id="simd-toggle" checked/>
+        <span>SIMD</span>
+      </label>
+      <button type="button" id="run-button" class="btn btn-success">▶ Run</button>
     </header>
-    <div id="middle">
-      <div id="editor"></div>
-      <div id="output" class="simulator">
-        <div class="schematic-buttons">
-          <button class="schematic-button-pause schematic-button" title="Pause/resume the simulation">
-            <!-- only one of these two images is visible at a time -->
-            <img src="resources/codicon/debug-pause.svg" class="button-img-pause"/>
-            <img src="resources/codicon/play.svg" class="button-img-play"/>
-          </button>
+    <main id="middle">
+      <div id="editor" role="textbox" aria-label="Go source editor"></div>
+      <div id="right-pane">
+        <div id="tabbar" role="tablist">
+          <button type="button" class="tab active" id="tab-run" role="tab" aria-selected="true" data-tab="run">Run</button>
+          <button type="button" class="tab" id="tab-wat" role="tab" aria-selected="false" data-tab="wat">WAT</button>
+          <button type="button" class="tab" id="tab-asm" role="tab" aria-selected="false" data-tab="asm">AVX2</button>
         </div>
-        <svg class="schematic" tabindex="0">
-          <g class="schematic-wrapper" style="transform: translate(50%, 50%)">
-            <g class="schematic-parts"></g>
-            <g class="schematic-wires"></g>
-          </g>
-        </svg>
-        <div class="panels">
-          <div class="tabbar">
-            <span class="tab active panel-tab-terminal"><a>Terminal</a></span>
-            <span class="tab"><a>Properties</a></span>
-            <span class="tab"><a>Power</a></span>
-            <span class="tab"><a>Add</a></span>
-          </div>
-          <div class="tabcontent active terminal-box">
-            <div class="terminal" tabindex="0"></div>
-          </div>
-          <div class="tabcontent panel-properties">
-            <div class="content"></div>
-          </div>
-          <div class="tabcontent panel-power">
-            <div class="content" tabindex="0">
-              <div class="power-table">Loading...</div>
-              <p class="mb-0 mt-3"><strong>Note:</strong> these numbers are estimates, based on datasheets and measurements. They don't include everything and may be wrong.</p>
-            </div>
-          </div>
-          <div class="tabcontent panel-add">
-            <div class="content">Loading...</div>
-          </div>
-        </div>
-        <div class="schematic-tooltip"></div>
-        <div class="templates">
-          <button class="panel-add-button">Add</button>
-          <select class="panel-add-select"></select>
-        </div>
+        <pre id="output-pane" role="tabpanel" aria-labelledby="tab-run"><code id="output-code"></code></pre>
+        <div id="hint"></div>
       </div>
-    </div>
-
-    <div class="modal fade" id="aboutModal" tabindex="-1" aria-labelledby="aboutModalTitle" aria-hidden="true">
-      <div class="modal-dialog">
-        <div class="modal-content">
-          <div class="modal-header">
-            <h1 class="modal-title fs-5" id="exampleModalLabel">About TinyGo Playground</h1>
-            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-          </div>
-          <div class="modal-body">
-            <p>
-              The TinyGo Playground is a service provided by the TinyGo project
-              to compile and run small code samples directly in the browser. It
-              has been heavily inspired by the <a
-              href="https://play.golang.org/">Go Playground</a> but differs in
-              some significant ways:
-            </p>
-
-            <ul>
-              <li>
-                We use the <a href="https://github.com/tinygo-org/tinygo">TinyGo compiler</a> in addition to the main Go compiler.
-              </li>
-              <li>
-                Instead of running code on the server, code is compiled to <a
-                href="https://webassembly.org/">WebAssembly</a> and runs
-                directly in the browser.
-              </li>
-              <li>
-                It can simulate a few popular boards directly in the browser.
-                However, please note that this is a simulation which can differ
-                in behavior from how the program will run on the actual device.
-              </li>
-              <li>
-                Boards that support drag-and-drop programming can be flashed
-                directly using the Flash button.
-              </li>
-            </ul>
-
-            <p>
-              For more information, visit <a
-              href="https://tinygo.org/">tinygo.org</a>.
-            </p>
-
-            <p>
-              Source code of the playground: <a
-              href="https://github.com/tinygo-org/playground">github.com/tinygo-org/playground</a>.
-            </p>
-          </div>
-          <div class="modal-footer">
-            <button type="button" class="btn btn-primary" data-bs-dismiss="modal">Close</button>
-          </div>
-        </div>
-      </div>
-    </div>
+    </main>
   </body>
 </html>

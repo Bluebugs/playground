@@ -1,300 +1,299 @@
-import { Simulator } from './simulator.js';
-import { boards } from './boards.js';
+// SPMD Playground frontend.
+// Loads examples from the manifest, drives the editor, and renders the three
+// compiler-output tabs (Run / WAT / AVX2).
+
 import { Editor } from './resources/editor.bundle.min.js';
+import { highlightWAT } from './highlight-wat.js';
+import { highlightX86 } from './highlight-x86.js';
 
-// This file controls the entire playground window, except for the output part
-// on the right that is shared with the VS Code extension.
+const API = '/api';
+const EXAMPLE_BASE = '/examples/spmd';
 
-const API_URL = location.hostname == 'localhost' ? '/api' : 'https://playground-bttoqog3vq-uc.a.run.app/api';
-
-var project = null;
-var db = null;
-const defaultProjectName = 'console';
-
-let simulator = null;
 let editor = null;
+let manifest = [];
+let currentExample = null;
+let activeTab = 'run';
+let simdEnabled = true;
 
-// updateBoards updates the dropdown menu. This must be done after loading the
-// boards or updating the target selection.
-async function updateBoards() {
-  if (project) {
-    let button = document.querySelector('#target > button');
-    if (project.humanName) {
-      button.textContent = project.humanName + ' ';
-    } else if (project.created) {
-      button.textContent = project.defaultHumanName + ' * ';
-    } else {
-      button.textContent = project.defaultHumanName + ' ';
-    }
-  }
+// cache key = `${sha1(src)}|${simdEnabled}|${tab}|${symbols}`
+const outputCache = new Map();
 
-  let projects = await getProjects();
+// One-shot worker per Run invocation (worker is terminated after it exits).
+let runWorker = null;
 
-  let dropdown = document.querySelector('#target > .dropdown-menu');
-  dropdown.innerHTML = '';
-  for (let name in boards) {
-    let item = document.createElement('a');
-    item.textContent = boards[name].humanName;
-    item.classList.add('dropdown-item');
-    if (project && name == project.name) {
-      item.classList.add('active');
-    }
-    item.setAttribute('href', '');
-    item.dataset.name = name;
-    dropdown.appendChild(item);
-    item.addEventListener('click', (e) => {
-      e.preventDefault();
-      setProject(item.dataset.name);
-    });
-  }
+// AbortController for in-flight fetches. Cancelled on tab switch / SIMD toggle
+// / example change so stale responses don't stomp the active pane.
+let pendingController = null;
 
-  if (!projects.length) {
-    // No saved projects.
+async function init() {
+  // Load manifest.
+  try {
+    manifest = await fetch(`${API}/examples`).then(r => r.json());
+  } catch (e) {
+    setPaneError(`failed to load /api/examples: ${e}`);
     return;
   }
+  buildDropdown(manifest);
 
-  let divider = document.createElement('div');
-  divider.classList.add('dropdown-divider');
-  dropdown.appendChild(divider);
+  // Editor. Must call setText() once before .text() works (initializes view).
+  editor = new Editor(document.getElementById('editor'));
+  editor.setText('');
 
-  // Add a list of projects (modified templates).
-  for (let projectObj of projects) {
-    let item = document.createElement('a');
-    item.innerHTML = '<span class="text"><span class="name"></span> – <i class="time"></i></span><span class="buttons"><button class="btn btn-light btn-sm edit-symbol rename" title="Rename">✎</button> <button class="btn btn-light btn-sm delete" title="Delete">🗑</button></span>';
-    if (projectObj.humanName) {
-      item.querySelector('.text').textContent = projectObj.humanName;
-    } else {
-      item.querySelector('.name').textContent = projectObj.defaultHumanName;
-      item.querySelector('.time').textContent = projectObj.created.toISOString();
-    }
-    item.classList.add('dropdown-item');
-    item.classList.add('project-name');
-    if (project && projectObj.name == project.name) {
-      item.classList.add('active');
-    }
-    item.setAttribute('href', '');
-    item.dataset.name = projectObj.name;
-    dropdown.appendChild(item);
-    item.addEventListener('click', (e) => {
-      e.preventDefault();
-      setProject(item.dataset.name);
+  // Wire controls.
+  document.getElementById('simd-toggle').addEventListener('change', onSimdToggle);
+  document.getElementById('run-button').addEventListener('click', () => {
+    activateTab('run');
+    refreshActiveTab(/*force=*/true);
+  });
+  for (const t of document.querySelectorAll('#tabbar .tab')) {
+    t.addEventListener('click', () => {
+      activateTab(t.dataset.tab);
+      refreshActiveTab();
     });
+  }
 
-    item.querySelector('.rename').addEventListener('click', (e) => {
+  // Load first example.
+  if (manifest.length > 0) await loadExample(manifest[0].key);
+}
+
+function buildDropdown(items) {
+  const menu = document.getElementById('example-menu');
+  menu.innerHTML = '';
+  for (const ex of items) {
+    const a = document.createElement('a');
+    a.classList.add('dropdown-item');
+    a.href = '#';
+    a.textContent = ex.label;
+    a.dataset.key = ex.key;
+    a.addEventListener('click', (e) => {
       e.preventDefault();
-      e.stopPropagation();
-
-      let name = e.target.parentNode.parentNode.dataset.name;
-      let humanName = prompt('Project name', projectObj.humanName || projectObj.defaultHumanName);
-      if (!humanName) {
-        return; // clicked 'cancel'
-      }
-
-      if (project.name == name) {
-        // Update name of current project.
-        project.humanName = humanName;
-      }
-      let tx = db.transaction(['projects'], 'readwrite');
-      tx.objectStore('projects').get(name).onsuccess = function(e) {
-        let obj = e.target.result;
-        obj.humanName = humanName;
-        tx.objectStore('projects').put(obj).onsuccess = function(e) {
-          updateBoards();
-        };
-      };
+      loadExample(ex.key);
     });
-
-    item.querySelector('.delete').addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-
-      let name = e.target.parentNode.parentNode.dataset.name;
-      if (name == project.name) {
-        // Removing the currently active project.
-        // Pick the base project using a bit of a hack (because we don't store
-        // the original project name in the data object).
-        let matches = project.parts[0].location.match(RegExp('^parts/([a-z0-9_-]+)\.json$'));
-        if (matches) {
-          // Found the project name, so use that.
-          setProject(matches[1]);
-        } else {
-          // Fallback towards using the default name.
-          setProject(defaultProjectName);
-        }
-      }
-      db.transaction(['projects'], 'readwrite').objectStore('projects').delete(name);
-      updateBoards();
-    });
+    menu.appendChild(a);
   }
 }
 
-// setProject updates the current project to the new project name.
-async function setProject(name) {
-  if (project && project.created) {
-    saveProject(project, editor.text());
+async function loadExample(key) {
+  const ex = manifest.find(e => e.key === key);
+  if (!ex) return;
+  currentExample = ex;
+  document.getElementById('example-label').textContent = ex.label;
+  document.getElementById('hint').textContent = ex.hint || '';
+  // Mark the active item in the dropdown.
+  for (const a of document.querySelectorAll('#example-menu .dropdown-item')) {
+    a.classList.toggle('active', a.dataset.key === key);
   }
-  project = await loadProject(name);
-  if (!project) {
-    // Project not in the database, fall back on something working.
-    project = await loadProject(defaultProjectName);
-  }
-  updateBoards();
-  editor.setText(project.code);
-
-  // Load simulator if not already done so (it must only happen once).
-  if (!simulator) {
-    let root = document.querySelector('#output');
-    simulator = new Simulator({
-      root: root,
-      editor: editor,
-      firmwareButton: document.querySelector('#btn-flash'),
-      apiURL: API_URL,
-      saveState: () => {
-        saveProject(project);
-        localStorage.tinygo_playground_projectName = project.name;
-      },
+  // Fetch source.
+  let src;
+  try {
+    src = await fetch(`${EXAMPLE_BASE}/${key}/main.go`).then(r => {
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      return r.text();
     });
+  } catch (e) {
+    setPaneError(`failed to load example ${key}: ${e}`);
+    return;
   }
-
-  // Change to the new project state.
-  await simulator.setState(project);
-
-  // Load the same project on a reload.
-  localStorage.tinygo_playground_projectName = name;
+  editor.setText(src);
+  refreshActiveTab();
 }
 
-// getProjects returns the complete list of project objects from the projects
-// store.
-async function getProjects() {
-  // Load all projects.
-  let projects = [];
-  return await new Promise(function(resolve, reject) {
-    db.transaction(['projects'], 'readonly').objectStore('projects').openCursor().onsuccess = function(e) {
-      var cursor = e.target.result;
-      if (cursor) {
-        projects.push(cursor.value);
-        cursor.continue();
-      } else {
-        resolve(projects);
-      }
+function activateTab(name) {
+  activeTab = name;
+  for (const t of document.querySelectorAll('#tabbar .tab')) {
+    const isActive = t.dataset.tab === name;
+    t.classList.toggle('active', isActive);
+    t.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  }
+  const panel = document.getElementById('output-pane');
+  if (panel) panel.setAttribute('aria-labelledby', `tab-${name}`);
+}
+
+function onSimdToggle(e) {
+  simdEnabled = e.target.checked;
+  refreshActiveTab();
+}
+
+function srcText() {
+  return editor.text();
+}
+
+// Lightweight non-cryptographic hash; only used as a cache key.
+function fastHash(s) {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(16);
+}
+
+function cacheKey() {
+  const sym = (currentExample?.symbols || []).join(',');
+  return `${fastHash(srcText())}|${simdEnabled}|${activeTab}|${sym}`;
+}
+
+async function refreshActiveTab(force = false) {
+  // Cancel any in-flight fetches and kill any running worker. Rapid tab
+  // switches / SIMD toggles / example changes otherwise leave stale work
+  // resolving later and stomping the active pane.
+  if (pendingController) pendingController.abort();
+  pendingController = new AbortController();
+  const signal = pendingController.signal;
+  if (runWorker) { try { runWorker.terminate(); } catch {} runWorker = null; }
+
+  const key = cacheKey();
+  if (!force && outputCache.has(key)) {
+    return renderResult(outputCache.get(key));
+  }
+  setPaneText('Compiling…');
+  try {
+    const result = await fetchForActiveTab(signal);
+    if (signal.aborted) return;
+    outputCache.set(key, result);
+    renderResult(result);
+  } catch (e) {
+    if (e && e.name === 'AbortError') return;
+    renderResult({ kind: 'error', text: String(e && e.message || e) });
+  }
+}
+
+async function fetchForActiveTab(signal) {
+  const src = srcText();
+  const body = src;
+  const headers = { 'Content-Type': 'text/plain' };
+  if (activeTab === 'wat') {
+    try {
+      const r = await fetch(`${API}/wat?simd=${simdEnabled}`, { method: 'POST', headers, body, signal });
+      return { kind: 'wat', text: await r.text() };
+    } catch (e) {
+      if (e && e.name === 'AbortError') return { kind: 'aborted' };
+      throw e;
     }
+  }
+  if (activeTab === 'asm') {
+    const syms = (currentExample?.symbols || []).join(',');
+    const qs = `simd=${simdEnabled}` + (syms ? `&symbols=${encodeURIComponent(syms)}` : '');
+    try {
+      const r = await fetch(`${API}/asm?${qs}`, { method: 'POST', headers, body, signal });
+      return { kind: 'asm', text: await r.text() };
+    } catch (e) {
+      if (e && e.name === 'AbortError') return { kind: 'aborted' };
+      throw e;
+    }
+  }
+  // Run: compile to wasi then execute in a worker.
+  return runWASI(src, signal);
+}
+
+async function runWASI(src, signal) {
+  // Kill any previous worker (refreshActiveTab also does this, but be safe).
+  if (runWorker) {
+    try { runWorker.terminate(); } catch {}
+    runWorker = null;
+  }
+  // 1. Compile.
+  const compileURL = `${API}/compile?format=wasi&compiler=tinygo&simd=${simdEnabled}`;
+  let resp;
+  try {
+    resp = await fetch(compileURL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: src,
+      signal,
+    });
+  } catch (e) {
+    if (e && e.name === 'AbortError') return { kind: 'aborted' };
+    throw e;
+  }
+  const ct = resp.headers.get('Content-Type') || '';
+  if (!ct.includes('application/wasm')) {
+    // Compile error: server sent text body with 200.
+    const text = await resp.text();
+    if (signal.aborted) return { kind: 'aborted' };
+    return { kind: 'error', text: `// compile failed:\n${text}` };
+  }
+  const bytes = new Uint8Array(await resp.arrayBuffer());
+
+  // If user has moved on while we were downloading bytes, bail before
+  // spawning a worker.
+  if (signal.aborted) return { kind: 'aborted' };
+
+  // 2. Run in worker.
+  return new Promise((resolve) => {
+    const worker = new Worker('worker/runner.js');
+    runWorker = worker;
+    let stdout = '';
+    // 5s is generous for current examples (32x16 mandelbrot, 64-byte encode, etc.).
+    // Revisit if examples with larger inputs are added.
+    const timeout = setTimeout(() => {
+      try { worker.terminate(); } catch {}
+      resolve({ kind: 'run', text: stdout + '\n// (timed out after 5s)' });
+    }, 5000);
+    worker.onmessage = (e) => {
+      const msg = e.data;
+      switch (msg.type) {
+        case 'stdout':
+          stdout += msg.data;
+          // Live-stream into the pane while we wait (unless we've been aborted).
+          if (!signal.aborted) setPaneText(stdout);
+          break;
+        case 'error':
+          clearTimeout(timeout);
+          try { worker.terminate(); } catch {}
+          if (signal.aborted) { resolve({ kind: 'aborted' }); break; }
+          resolve({ kind: 'error', text: stdout + (stdout ? '\n' : '') + String(msg.message) });
+          break;
+        case 'exited':
+          clearTimeout(timeout);
+          try { worker.terminate(); } catch {}
+          if (signal.aborted) { resolve({ kind: 'aborted' }); break; }
+          resolve({ kind: 'run', text: stdout });
+          break;
+        // 'compiling' / 'loading' / 'started' are progress signals; ignore.
+      }
+    };
+    worker.onerror = (e) => {
+      clearTimeout(timeout);
+      try { worker.terminate(); } catch {}
+      if (signal.aborted) { resolve({ kind: 'aborted' }); return; }
+      resolve({ kind: 'error', text: String(e.message || e) });
+    };
+    worker.postMessage({ type: 'start', sourceData: bytes });
   });
 }
 
-
-// Load a project based on a project name.
-async function loadProject(name) {
-  // New, clean project.
-  if (name in boards) {
-    let board = boards[name];
-    return {
-      name: name,
-      defaultHumanName: board.humanName,
-      code: board.code,
-      compiler: board.compiler,
-      parts: [
-        {
-          id: 'main',
-          location: board.location,
-          x: 0,
-          y: 0,
-        },
-      ],
-      wires: [],
-    };
+function renderResult(result) {
+  const pane = document.getElementById('output-code');
+  if (!result) { pane.textContent = ''; return; }
+  if (result.kind === 'aborted') return; // a newer refresh has taken over
+  switch (result.kind) {
+    case 'wat':
+      // If the server returned an error blob (no v128.* / proper sexpr), it
+      // still renders as plain escaped text since the highlighter only adds
+      // spans to recognized mnemonics.
+      pane.innerHTML = highlightWAT(result.text || '');
+      break;
+    case 'asm':
+      pane.innerHTML = highlightX86(result.text || '');
+      break;
+    case 'run':
+      pane.textContent = result.text || '(no output)';
+      break;
+    case 'error':
+      pane.textContent = result.text || '(error)';
+      break;
+    default:
+      pane.textContent = '';
   }
-
-  // Load existing project.
-  return await new Promise((resolve, reject) => {
-    let transaction = db.transaction(['projects'], 'readonly');
-    transaction.objectStore('projects').get(name).onsuccess = async function(e) {
-      if (e.target.result === undefined) {
-        resolve(null); // project does not exist in DB
-        return;
-      }
-      let data = e.target.result;
-      if (data.target) {
-        // Upgrade old data format.
-        data.parts = {
-          main: {
-            location: 'parts/'+data.target+'.json',
-            x: 0,
-            y: 0,
-          },
-        };
-        delete data.target;
-      }
-      if (!data.wires) {
-        data.wires = [];
-      }
-      resolve(data);
-    };
-  });
 }
 
-// Save the project to the database.
-function saveProject(project, code) {
-  if (!project.created) {
-    // Project is saved for the first time.
-    project.created = new Date();
-    project.name = project.name + '-' + project.created.toISOString();
-  }
-  if (code) {
-    project.code = code;
-  }
-  let transaction = db.transaction(['projects'], 'readwrite');
-  transaction.objectStore('projects').put(project).onsuccess = function(e) {
-    updateBoards();
-  };
-  transaction.onerror = function(e) {
-    console.error('failed to save project:', e);
-    e.stopPropagation();
-  };
+function setPaneText(text) {
+  document.getElementById('output-code').textContent = text;
 }
 
-// loadDB loads the playground database asynchronously. It returns a promise
-// that resolves when the database is loaded.
-function loadDB() {
-  return new Promise((resolve, reject) => {
-    // First get the database.
-    let request = indexedDB.open("tinygo-playground", 2);
-    request.onupgradeneeded = function(e) {
-      let db = e.target.result;
-      if (e.oldVersion == 1) {
-        // The proper way would be to upgrade the object store in place, but the
-        // easy way is to simply drop all existing data.
-        db.deleteObjectStore('projects');
-      }
-      let projects = db.createObjectStore('projects', {keyPath: 'name', autoIncrement: true});
-      projects.createIndex('target', 'target', {unique: false});
-    };
-    request.onsuccess = function(e) {
-      resolve(e.target.result);
-    };
-    request.onerror = function(e) {
-      reject(e);
-    };
-  })
+function setPaneError(text) {
+  setPaneText(text);
 }
 
-// Initialize the playground.
-document.addEventListener('DOMContentLoaded', async function(e) {
-  // Create the editor.
-  editor = new Editor(document.getElementById("editor"));
-
-  // Start loading everything.
-  let dbPromise = loadDB();
-
-  // Wait for everything to complete loading.
-  db = await dbPromise;
-  db.onerror = function(e) {
-    console.error('database error:', e);
-  };
-
-  // Update the drop down list of boards and projects.
-  updateBoards();
-
-  // Load the current default project.
-  // This updates the target, which will start a compilation in the background.
-  setProject(localStorage.tinygo_playground_projectName || defaultProjectName);
-})
+init();

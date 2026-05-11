@@ -202,6 +202,13 @@ class Runner {
         fd_seek: () => {
           return ERRNO_NOSYS; // not implemented
         },
+        fd_read: (fd, iovs_ptr, iovs_len, nread_ptr) => {
+          // Minimal stdin shim: report zero bytes read on every call. The SPMD
+          // examples treat empty stdin as a signal to use their built-in
+          // demo input, so this is the right behaviour for the playground.
+          this.envMem().setUint32(nread_ptr, 0, true);
+          return SUCCESS;
+        },
         fd_write: (fd, iovs_ptr, iovs_len, nwritten_ptr) => {
           return this.logWrite(fd, iovs_ptr, iovs_len, nwritten_ptr);
         },
