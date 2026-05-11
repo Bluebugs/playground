@@ -1,0 +1,16 @@
+# Files Netlify should not upload to the static CDN.
+# `publish = "."` in netlify.toml would otherwise ship server-side code and
+# build artifacts. Keep this list in sync with the actual static-asset set
+# (examples/, index.html, dashboard.*, highlight-*.js, resources/, worker/).
+*.go
+go.mod
+go.sum
+Dockerfile
+Makefile
+*.sh
+DEPLOYMENT.md
+UI_CHECKLIST.md
+editor/
+tinygo-template/
+.gitignore
+release-spmd.tar.gz

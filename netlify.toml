@@ -1,5 +1,53 @@
+# Netlify configuration for the SPMD playground static frontend.
+#
+# Deployment model: Model B (split static / API).
+#   - Netlify serves the static assets (index.html, dashboard.{js,css},
+#     highlight-*.js, resources/, worker/, examples/).
+#   - The SPMD compiler backend runs on Cloud Run and is reverse-proxied at
+#     /api/*. This mirrors the upstream play.tinygo.org deployment shape, keeps
+#     the static layer cheap, and lets the heavy Cloud Run instance scale
+#     independently.
+#
+# Public site target: https://spmd.ddlm.me
+#
+# Cloud Run backend URL: set CLOUDRUN_URL after the first deploy and replace
+# the placeholder below. Until then the redirect points at the literal
+# placeholder so any unconfigured deploy fails loud rather than silently
+# falling back to a stale endpoint.
+
+[build]
+  publish = "."
+  command = "npm install && make resources/editor.bundle.min.js"
+
+# Reverse-proxy the compile API to Cloud Run. status=200 + force=true makes
+# Netlify rewrite (not redirect) so the browser sees a same-origin response,
+# which keeps COOP/COEP and CORS straightforward.
+[[redirects]]
+  from = "/api/*"
+  to = "https://REPLACE_BEFORE_DEPLOY.invalid/api/:splat"
+  status = 200
+  force = true
+
+# COOP/COEP are required for SharedArrayBuffer / cross-origin isolation used by
+# the in-browser wasm runner.
 [[headers]]
   for = "/*"
   [headers.values]
     Cross-Origin-Opener-Policy = "same-origin"
     Cross-Origin-Embedder-Policy = "require-corp"
+
+# Cache static assets for a day. We deliberately avoid `immutable` and a year-
+# long max-age because the filenames are not content-hashed: runner.js,
+# editor.bundle.min.js etc. keep their names across deploys, so an aggressive
+# immutable policy would freeze stale code on user browsers. A 1-day window
+# gives the CDN room to serve without making bug-fix deploys take a year to
+# reach users.
+[[headers]]
+  for = "/resources/editor.bundle.min.js"
+  [headers.values]
+    Cache-Control = "public, max-age=86400"
+
+[[headers]]
+  for = "/worker/*"
+  [headers.values]
+    Cache-Control = "public, max-age=86400"
