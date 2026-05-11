@@ -14,15 +14,17 @@ if [ ! -x "$TINYGO_BIN" ]; then
   exit 1
 fi
 
-# 2. Start the playground server in the background.
+# 2. Start the playground server in the background, in its own process group.
+# `go run .` builds and execs a child binary; killing the wrapper alone leaks the
+# child and keeps stdout pipes open. Use setsid + kill the whole group.
 cd "$SCRIPT_DIR"
 PATH="$GO_BIN:$REPO_ROOT/tinygo/build:$PATH" \
   GOEXPERIMENT=spmd \
-  go run . &
+  setsid go run . </dev/null >/tmp/playground-test.log 2>&1 &
 SERVER_PID=$!
 
-# Ensure the server is killed on exit regardless of how this script terminates.
-trap "kill $SERVER_PID 2>/dev/null || true" EXIT
+# Kill the whole process group on exit so the server and its build/exec child both die.
+trap "kill -- -$SERVER_PID 2>/dev/null || true" EXIT
 
 # 3. Poll /api/examples until the server is ready (max 30s).
 echo "Waiting for server to start..."
