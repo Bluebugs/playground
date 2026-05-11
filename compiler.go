@@ -391,7 +391,7 @@ func cacheFilename(compiler, target, sourceHash, format string, simd bool, symbo
 		sorted := append([]string(nil), symbols...)
 		sort.Strings(sorted)
 		h := sha256.Sum256([]byte(strings.Join(sorted, ",")))
-		symSuffix = "-" + hex.EncodeToString(h[:8])
+		symSuffix = "-" + hex.EncodeToString(h[:16])
 	}
 	return filepath.Join(cacheDir, "build-"+compiler+"-"+target+"-"+sourceHash+"-"+simdSuffix+symSuffix+"."+format)
 }
