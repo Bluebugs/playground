@@ -1,0 +1,56 @@
+[
+  {
+    "key": "simple-sum",
+    "label": "Simple sum",
+    "symbols": ["main.Sum"],
+    "hint": "Reduction across lanes. Look for v128.* in WAT, vpaddd in AVX2."
+  },
+  {
+    "key": "hex-encode",
+    "label": "Hex encode (table lookup)",
+    "symbols": ["main.Encode"],
+    "hint": "Single vpshufb / i8x16.swizzle does the entire nibble->hex map."
+  },
+  {
+    "key": "lo-contains",
+    "label": "lo.Contains (uniform exit)",
+    "symbols": ["main.containsSPMD"],
+    "hint": "reduce.Any -> vtestps + early-exit. ~7x scalar."
+  },
+  {
+    "key": "lo-sum",
+    "label": "lo.Sum (reduction)",
+    "symbols": ["main.sumSPMD"],
+    "hint": "Classic reduction baseline."
+  },
+  {
+    "key": "mandelbrot",
+    "label": "Mandelbrot (per-lane break)",
+    "symbols": ["main.mandelSPMD", "main.mandelbrotSPMD"],
+    "hint": "Varying control flow + early-exit when all lanes broken."
+  },
+  {
+    "key": "base64-mula-lemire",
+    "label": "Base64 decode (Mula-Lemire)",
+    "symbols": ["main.spmdDecode", "main.decodeAndPack"],
+    "hint": "Cascading byte->i16->i32 -> vpmaddubsw, vpmaddwd, vpshufb, vpermd."
+  },
+  {
+    "key": "cross-lane-rotate",
+    "label": "Cross-lane rotate",
+    "symbols": ["main.RotateDemo"],
+    "hint": "lanes.Rotate compiles to a single shufflevector."
+  },
+  {
+    "key": "table-lookup",
+    "label": "Vectorized table lookup",
+    "symbols": ["main.Lookup"],
+    "hint": "[16]byte{...}[varying] -> one vpshufb / i8x16.swizzle."
+  },
+  {
+    "key": "saxpy",
+    "label": "SAXPY (practical-vector)",
+    "symbols": ["main.saxpy"],
+    "hint": "a*x + y, fused multiply-add via vfm*."
+  }
+]
