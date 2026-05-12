@@ -279,9 +279,30 @@ func handleCompile(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleWAT handles POST /api/wat?simd=true|false
+// parseSymbols parses comma-separated function symbols from the `symbols` query
+// param, trimming whitespace and capping the result so one request can't
+// monopolise the compile goroutine.
+func parseSymbols(r *http.Request) []string {
+	const maxSymbols = 16
+	var symbols []string
+	if s := r.FormValue("symbols"); s != "" {
+		for _, sym := range strings.Split(s, ",") {
+			sym = strings.TrimSpace(sym)
+			if sym != "" {
+				symbols = append(symbols, sym)
+			}
+			if len(symbols) >= maxSymbols {
+				break
+			}
+		}
+	}
+	return symbols
+}
+
+// handleWAT handles POST /api/wat?simd=true|false&symbols=main.Foo,main.Bar
 // Compiles the source to WASM and converts to WebAssembly text format via wasm2wat.
-// Returns text/plain body with the WAT content (no gzip — text is small and easier to debug).
+// When `symbols` is provided, filters the WAT to only those functions (mirrors
+// the per-symbol disassembly of /api/asm). Returns text/plain (no gzip).
 func handleWAT(w http.ResponseWriter, r *http.Request) {
 	addAPIHeaders(w)
 	if r.Method == http.MethodOptions {
@@ -299,8 +320,9 @@ func handleWAT(w http.ResponseWriter, r *http.Request) {
 	}
 
 	simd := r.FormValue("simd") == "true"
+	symbols := parseSymbols(r)
 
-	filename, errOutput, err := runCompileJob(r.Context(), source, "tinygo", "", "wat", simd, nil)
+	filename, errOutput, err := runCompileJob(r.Context(), source, "tinygo", "", "wat", simd, symbols)
 	if err != nil {
 		log.Println("internal error running wat job:", err)
 		w.WriteHeader(http.StatusInternalServerError)
@@ -342,22 +364,7 @@ func handleASM(w http.ResponseWriter, r *http.Request) {
 	}
 
 	simd := r.FormValue("simd") == "true"
-
-	// Parse comma-separated symbols from query param (capped to keep one request
-	// from monopolising the compile goroutine with hundreds of objdump invocations).
-	const maxSymbols = 16
-	var symbols []string
-	if s := r.FormValue("symbols"); s != "" {
-		for _, sym := range strings.Split(s, ",") {
-			sym = strings.TrimSpace(sym)
-			if sym != "" {
-				symbols = append(symbols, sym)
-			}
-			if len(symbols) >= maxSymbols {
-				break
-			}
-		}
-	}
+	symbols := parseSymbols(r)
 
 	filename, errOutput, err := runCompileJob(r.Context(), source, "tinygo", "", "asm-avx2", simd, symbols)
 	if err != nil {

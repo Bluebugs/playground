@@ -162,21 +162,12 @@ async function fetchForActiveTab(signal) {
   const src = srcText();
   const body = src;
   const headers = { 'Content-Type': 'text/plain' };
-  if (activeTab === 'wat') {
-    try {
-      const r = await fetch(`${API}/wat?simd=${simdEnabled}`, { method: 'POST', headers, body, signal });
-      return { kind: 'wat', text: await r.text() };
-    } catch (e) {
-      if (e && e.name === 'AbortError') return { kind: 'aborted' };
-      throw e;
-    }
-  }
-  if (activeTab === 'asm') {
+  if (activeTab === 'wat' || activeTab === 'asm') {
     const syms = (currentExample?.symbols || []).join(',');
     const qs = `simd=${simdEnabled}` + (syms ? `&symbols=${encodeURIComponent(syms)}` : '');
     try {
-      const r = await fetch(`${API}/asm?${qs}`, { method: 'POST', headers, body, signal });
-      return { kind: 'asm', text: await r.text() };
+      const r = await fetch(`${API}/${activeTab}?${qs}`, { method: 'POST', headers, body, signal });
+      return { kind: activeTab, text: await r.text() };
     } catch (e) {
       if (e && e.name === 'AbortError') return { kind: 'aborted' };
       throw e;

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
@@ -188,6 +189,15 @@ func (job compilerJob) Run() error {
 				}
 				job.ResultErrors <- watBuf.Bytes()
 				return nil
+			}
+			// When specific symbols are requested, filter the WAT to just those
+			// functions plus a small header — mirrors the per-symbol output of
+			// `objdump --disassemble=<sym>` on the asm-avx2 path.
+			if len(job.Symbols) > 0 {
+				if err := filterWATBySymbols(tmpfile, job.Symbols); err != nil {
+					job.ResultErrors <- []byte("wat symbol filter: " + err.Error())
+					return nil
+				}
 			}
 			if err := os.Rename(tmpfile, job.Filename); err != nil {
 				job.ResultErrors <- []byte(err.Error())
@@ -397,4 +407,69 @@ func cacheFilename(compiler, target, sourceHash, format string, simd bool, symbo
 		symSuffix = "-" + hex.EncodeToString(h[:16])
 	}
 	return filepath.Join(cacheDir, "build-"+compiler+"-"+target+"-"+sourceHash+"-"+simdSuffix+symSuffix+"."+format)
+}
+
+// filterWATBySymbols rewrites a WAT file in place, keeping only top-level
+// `(func $<sym> ...)` blocks whose name matches one of `symbols`, plus a small
+// header. Indices into the original module are preserved by name (wasm2wat
+// resolves them when the WASM name section is present, which TinyGo emits).
+//
+// Paren-balanced from the opening `(func ...` to the matching close paren.
+// `;; comment` lines and inline `(;...;)` comments do not contain unbalanced
+// parens in wabt output, so naive paren counting is sufficient.
+func filterWATBySymbols(watFile string, symbols []string) error {
+	data, err := os.ReadFile(watFile)
+	if err != nil {
+		return err
+	}
+	want := make(map[string]bool, len(symbols))
+	for _, s := range symbols {
+		want["$"+s] = true
+	}
+	var out bytes.Buffer
+	fmt.Fprintf(&out, ";; Filtered to symbols: %s\n", strings.Join(symbols, ", "))
+	out.WriteString(";; Drop the ?symbols= query param to view the whole module.\n\n")
+
+	matched := make(map[string]bool, len(symbols))
+	lines := strings.Split(string(data), "\n")
+	capturing := false
+	depth := 0
+	for _, line := range lines {
+		if !capturing {
+			trimmed := strings.TrimLeft(line, " \t")
+			if strings.HasPrefix(trimmed, "(func $") {
+				rest := trimmed[len("(func "):]
+				end := strings.IndexAny(rest, " \t(")
+				if end < 0 {
+					end = len(rest)
+				}
+				name := rest[:end]
+				if want[name] {
+					capturing = true
+					depth = strings.Count(line, "(") - strings.Count(line, ")")
+					matched[name] = true
+					out.WriteString(line)
+					out.WriteByte('\n')
+					if depth <= 0 {
+						capturing = false
+						out.WriteByte('\n')
+					}
+				}
+			}
+			continue
+		}
+		depth += strings.Count(line, "(") - strings.Count(line, ")")
+		out.WriteString(line)
+		out.WriteByte('\n')
+		if depth <= 0 {
+			capturing = false
+			out.WriteByte('\n')
+		}
+	}
+	for sym := range want {
+		if !matched[sym] {
+			fmt.Fprintf(&out, ";; (symbol not found: %s)\n", sym)
+		}
+	}
+	return os.WriteFile(watFile, out.Bytes(), 0o666)
 }
