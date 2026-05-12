@@ -90,16 +90,19 @@ for ex in table-lookup base64-mula-lemire; do
   out=$(curl -fsS -X POST -H "Content-Type: text/plain" \
         --data-binary "@$src" \
         "http://localhost:${PORT}/api/wat?simd=true" || true)
-  if echo "$out" | grep -qE "wasm-opt failed|invalid code after SIMD prefix"; then
+  # Use here-strings rather than `echo "$out" | grep -q` — with `set -o pipefail`,
+  # grep -q's early exit causes SIGPIPE on echo, which fails the pipe and would
+  # invert the if-condition for large `$out`.
+  if grep -qE "wasm-opt failed|invalid code after SIMD prefix" <<< "$out"; then
     echo "FAIL: $ex SIMD=true WAT still hits wasm-opt failure inside container"
-    echo "$out" | head -20
+    head -20 <<< "$out"
     exit 1
   fi
-  if echo "$out" | grep -qE "i8x16|v128"; then
+  if grep -qE "i8x16|v128" <<< "$out"; then
     echo "OK:   $ex SIMD=true WAT contains SIMD ops"
   else
     echo "FAIL: $ex SIMD=true WAT lacks SIMD ops"
-    echo "$out" | head -20
+    head -20 <<< "$out"
     exit 1
   fi
 done

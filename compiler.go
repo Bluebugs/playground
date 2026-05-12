@@ -176,7 +176,10 @@ func (job compilerJob) Run() error {
 				return nil
 			}
 			// Convert wasm to wat.
-			watCmd := exec.CommandContext(job.Context, "wasm2wat", wasmTmp, "-o", tmpfile)
+			// --enable-all covers relaxed-simd and other proposals TinyGo may emit
+			// (i8x16.relaxed_swizzle, etc.) on this fork. Without it, wasm2wat
+			// rejects the post-Relaxed-SIMD opcodes (0xFD 0x100+).
+			watCmd := exec.CommandContext(job.Context, "wasm2wat", "--enable-all", wasmTmp, "-o", tmpfile)
 			watBuf := &bytes.Buffer{}
 			watCmd.Stderr = watBuf
 			if err := watCmd.Run(); err != nil {

@@ -23,9 +23,14 @@ all: build
 
 release-spmd.tar.gz:
 	@echo ">>> Ensuring forked Go + TinyGo are built ($(REPO_ROOT))"
-	$(MAKE) -C $(REPO_ROOT) build
+	@if [ ! -x $(FORKED_GO)/bin/go ] || [ ! -x $(FORKED_TINYGO)/build/tinygo ]; then \
+	    $(MAKE) -C $(REPO_ROOT) build; \
+	else \
+	    echo "(forked Go + TinyGo binaries present; skipping parent build)"; \
+	fi
 	@echo ">>> Building TinyGo redistributable release"
-	$(MAKE) -C $(FORKED_TINYGO) USE_SYSTEM_BINARYEN=1 build/release
+	PATH="$(FORKED_GO)/bin:$$PATH" GOEXPERIMENT=spmd \
+	    $(MAKE) -C $(FORKED_TINYGO) USE_SYSTEM_BINARYEN=1 build/release
 	@echo ">>> Staging /tmp/spmd-toolchain"
 	rm -rf /tmp/spmd-toolchain
 	mkdir -p /tmp/spmd-toolchain
