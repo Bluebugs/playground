@@ -213,8 +213,9 @@ func (job compilerJob) Run() error {
 			elfTmp := tmpfile + ".elf"
 			defer os.Remove(elfTmp)
 			// Reference: test/e2e/spmd-benchmark-x86.sh uses these exact features.
+			// +fma enables FMA3 (vfmadd*ps) so lanes.FMA lowers to a single fused op.
 			buildCmd := exec.CommandContext(job.Context, "tinygo", "build", "-json", "-o", elfTmp,
-				"-llvm-features=+ssse3,+sse4.2,+avx2", simdFlag, infile.Name())
+				"-llvm-features=+ssse3,+sse4.2,+avx2,+fma", simdFlag, infile.Name())
 			buildCmd.Dir = filepath.Dir(infile.Name())
 			buildBuf := &bytes.Buffer{}
 			buildCmd.Stdout = buildBuf
