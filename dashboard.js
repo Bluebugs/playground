@@ -1,6 +1,7 @@
 // SPMD Playground frontend.
 // Loads examples from the manifest, drives the editor, and renders the three
-// compiler-output tabs (Run / WAT / AVX2).
+// compiler-output tabs (Run / WASM / AVX2). The "WASM" tab shows WAT text
+// (wasm2wat output); only the user-facing label says WASM, internals stay "wat".
 
 import { Editor } from './resources/editor.bundle.min.js';
 import { highlightWAT } from './highlight-wat.js';

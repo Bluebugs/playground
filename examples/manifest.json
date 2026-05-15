@@ -51,6 +51,6 @@
     "key": "saxpy",
     "label": "SAXPY (practical-vector)",
     "symbols": ["main.saxpy"],
-    "hint": "a*x + y, fused multiply-add via vfm*."
+    "hint": "a*x + y via lanes.FMA -> single vfmadd213ps on AVX2."
   }
 ]
