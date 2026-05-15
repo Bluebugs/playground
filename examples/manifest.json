@@ -51,6 +51,6 @@
     "key": "saxpy",
     "label": "SAXPY (practical-vector)",
     "symbols": ["main.saxpy"],
-    "hint": "a*x + y via lanes.FMA -> single vfmadd213ps on AVX2."
+    "hint": "a*x + y via lanes.FMA -> vfmadd213ps on AVX2, f32x4.relaxed_madd on WASM."
   }
 ]
