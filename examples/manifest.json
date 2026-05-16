@@ -52,5 +52,11 @@
     "label": "SAXPY (practical-vector)",
     "symbols": ["main.saxpy"],
     "hint": "a*x + y via lanes.FMA -> vfmadd213ps on AVX2, f32x4.relaxed_madd on WASM."
+  },
+  {
+    "key": "scratch",
+    "label": "Blank — write your own",
+    "symbols": ["main.Compute"],
+    "hint": "Empty starter. Replace with your own SPMD code; keep a //go:noinline func for the WASM/AVX2 tabs."
   }
 ]
