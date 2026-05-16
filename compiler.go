@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -418,6 +419,11 @@ func cacheFilename(compiler, target, sourceHash, format string, simd bool, symbo
 // Paren-balanced from the opening `(func ...` to the matching close paren.
 // `;; comment` lines and inline `(;...;)` comments do not contain unbalanced
 // parens in wabt output, so naive paren counting is sufficient.
+//
+// Fallback: when wasm-opt inlines a small single-call-site function (e.g.
+// main.saxpy disappears into $runtime.run$1$gowrapper), the missing symbol is
+// noted and the gowrapper block is emitted with a clear annotation instead of
+// a bare "symbol not found" line.
 func filterWATBySymbols(watFile string, symbols []string) error {
 	data, err := os.ReadFile(watFile)
 	if err != nil {
@@ -431,46 +437,126 @@ func filterWATBySymbols(watFile string, symbols []string) error {
 	fmt.Fprintf(&out, ";; Filtered to symbols: %s\n", strings.Join(symbols, ", "))
 	out.WriteString(";; Drop the ?symbols= query param to view the whole module.\n\n")
 
-	matched := make(map[string]bool, len(symbols))
 	lines := strings.Split(string(data), "\n")
-	capturing := false
-	depth := 0
-	for _, line := range lines {
-		if !capturing {
-			trimmed := strings.TrimLeft(line, " \t")
-			if strings.HasPrefix(trimmed, "(func $") {
-				rest := trimmed[len("(func "):]
-				end := strings.IndexAny(rest, " \t(")
-				if end < 0 {
-					end = len(rest)
-				}
-				name := rest[:end]
-				if want[name] {
-					capturing = true
-					depth = strings.Count(line, "(") - strings.Count(line, ")")
-					matched[name] = true
-					out.WriteString(line)
-					out.WriteByte('\n')
-					if depth <= 0 {
-						capturing = false
-						out.WriteByte('\n')
+
+	// captureFuncBlock scans lines for a top-level `(func $target ...)` block
+	// and writes it (paren-balanced) into dst. Returns true if found.
+	captureFuncBlock := func(dst *bytes.Buffer, target string) bool {
+		capturing := false
+		depth := 0
+		found := false
+		for _, line := range lines {
+			if !capturing {
+				trimmed := strings.TrimLeft(line, " \t")
+				if strings.HasPrefix(trimmed, "(func $") {
+					rest := trimmed[len("(func "):]
+					end := strings.IndexAny(rest, " \t(")
+					if end < 0 {
+						end = len(rest)
+					}
+					name := rest[:end]
+					if name == target {
+						capturing = true
+						found = true
+						depth = strings.Count(line, "(") - strings.Count(line, ")")
+						dst.WriteString(line)
+						dst.WriteByte('\n')
+						if depth <= 0 {
+							capturing = false
+							dst.WriteByte('\n')
+						}
 					}
 				}
+				continue
 			}
-			continue
+			depth += strings.Count(line, "(") - strings.Count(line, ")")
+			dst.WriteString(line)
+			dst.WriteByte('\n')
+			if depth <= 0 {
+				capturing = false
+				dst.WriteByte('\n')
+			}
 		}
-		depth += strings.Count(line, "(") - strings.Count(line, ")")
-		out.WriteString(line)
-		out.WriteByte('\n')
-		if depth <= 0 {
-			capturing = false
-			out.WriteByte('\n')
+		return found
+	}
+
+	// Pass 1: capture all requested symbols that are present in the WAT.
+	matched := make(map[string]bool, len(symbols))
+	for sym := range want {
+		var block bytes.Buffer
+		if captureFuncBlock(&block, sym) {
+			matched[sym] = true
+			out.Write(block.Bytes())
 		}
 	}
+
+	// Pass 2: for symbols not found (inlined away by wasm-opt), attempt a
+	// fallback to the function that contains the inlined code. TinyGo WASI
+	// programs inline main.main and small single-call-site functions into
+	// $runtime.run$1$gowrapper; $main and $main.main do not appear in the
+	// final WAT after wasm-opt. Try candidates in priority order.
+	var missing []string
 	for sym := range want {
 		if !matched[sym] {
-			fmt.Fprintf(&out, ";; (symbol not found: %s)\n", sym)
+			missing = append(missing, sym)
 		}
 	}
+
+	if len(missing) > 0 {
+		// Build the fallback candidate list. Static priority: $main.main first,
+		// then the canonical gowrapper name. Additionally, scan the WAT for any
+		// $runtime.run$N$gowrapper variant in case the index differs.
+		gowrapperRe := regexp.MustCompile(`^\$runtime\.run\$[0-9]+\$gowrapper$`)
+		seen := map[string]bool{"$main.main": true, "$runtime.run$1$gowrapper": true}
+		fallbackCandidates := []string{"$main.main", "$runtime.run$1$gowrapper"}
+		for _, line := range lines {
+			trimmed := strings.TrimLeft(line, " \t")
+			if !strings.HasPrefix(trimmed, "(func $") {
+				continue
+			}
+			rest := trimmed[len("(func "):]
+			end := strings.IndexAny(rest, " \t(")
+			if end < 0 {
+				end = len(rest)
+			}
+			name := rest[:end]
+			if gowrapperRe.MatchString(name) && !seen[name] {
+				seen[name] = true
+				fallbackCandidates = append(fallbackCandidates, name)
+			}
+		}
+
+		// Pick the first candidate that (a) exists in the WAT and (b) was not
+		// already emitted as one of the matched requested symbols.
+		fallbackName := ""
+		for _, candidate := range fallbackCandidates {
+			if matched[candidate] {
+				// Already emitted as a matched symbol; try the next candidate.
+				continue
+			}
+			var probe bytes.Buffer
+			if captureFuncBlock(&probe, candidate) {
+				fallbackName = candidate
+				break
+			}
+		}
+
+		sort.Strings(missing) // deterministic order in annotation
+		if fallbackName != "" {
+			// Emit a clear annotation then the fallback block so the user knows
+			// which symbol was requested, why it is absent, and what they are
+			// actually looking at.
+			fmt.Fprintf(&out,
+				";; (symbols inlined by wasm-opt: %s — showing %s, which contains the inlined code)\n",
+				strings.Join(missing, ", "), fallbackName)
+			captureFuncBlock(&out, fallbackName)
+		} else {
+			// No fallback available; keep the original last-resort behavior.
+			for _, sym := range missing {
+				fmt.Fprintf(&out, ";; (symbol not found: %s)\n", sym)
+			}
+		}
+	}
+
 	return os.WriteFile(watFile, out.Bytes(), 0o666)
 }
