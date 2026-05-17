@@ -25,16 +25,16 @@ const (
 )
 
 type compilerJob struct {
-	Source       []byte         // source code of program to compile
-	SourceHash   string         // sha256 of source (in hex form)
-	Filename     string         // cache file path
-	Compiler     string         // compiler to use for this job
-	Target       string         // target board name, or "wasm"
-	Format       string         // output format: "wasm", "hex", "wat", "asm-avx2", etc.
-	SIMD         bool           // whether to pass -simd=true or -simd=false to tinygo
-	Symbols      []string       // function symbols to extract for asm-avx2; empty = whole .text
-	ResultFile   chan string     // filename on completion
-	ResultErrors chan []byte     // errors on completion
+	Source       []byte      // source code of program to compile
+	SourceHash   string      // sha256 of source (in hex form)
+	Filename     string      // cache file path
+	Compiler     string      // compiler to use for this job
+	Target       string      // target board name, or "wasm"
+	Format       string      // output format: "wasm", "hex", "wat", "asm-avx2", etc.
+	SIMD         bool        // whether to pass -simd=true or -simd=false to tinygo
+	Symbols      []string    // function symbols to extract for asm-avx2; empty = whole .text
+	ResultFile   chan string // filename on completion
+	ResultErrors chan []byte // errors on completion
 	Context      context.Context
 }
 
@@ -229,9 +229,18 @@ func (job compilerJob) Run() error {
 				job.ResultErrors <- stripFilename(buildBuf.Bytes(), infile.Name())
 				return nil
 			}
-			// Disassemble: per-symbol or whole .text.
+			// Disassemble: whole .text, prefix-filtered, or per-symbol.
+			//
+			// A requested symbol ending in `*` is a prefix wildcard (e.g.
+			// `main.*` from the scratch example, where the user-written
+			// function name is unknown). objdump's --disassemble takes an
+			// exact symbol only, so wildcards force a whole-.text dump that
+			// is then filtered to the matching `<name>` blocks. The fast
+			// per-symbol path is kept for the fixed-symbol examples.
+			exactSyms, prefixSyms := splitWildcardSymbols(job.Symbols)
 			asmBuf := &bytes.Buffer{}
-			if len(job.Symbols) == 0 {
+			switch {
+			case len(job.Symbols) == 0:
 				objCmd := exec.CommandContext(job.Context, "objdump", "-d", "-M", "intel", "--no-show-raw-insn", elfTmp)
 				objCmd.Stdout = asmBuf
 				objCmd.Stderr = asmBuf
@@ -239,7 +248,17 @@ func (job compilerJob) Run() error {
 					job.ResultErrors <- asmBuf.Bytes()
 					return nil
 				}
-			} else {
+			case len(prefixSyms) > 0:
+				wholeBuf := &bytes.Buffer{}
+				objCmd := exec.CommandContext(job.Context, "objdump", "-d", "-M", "intel", "--no-show-raw-insn", elfTmp)
+				objCmd.Stdout = wholeBuf
+				objCmd.Stderr = wholeBuf
+				if err := objCmd.Run(); err != nil {
+					job.ResultErrors <- wholeBuf.Bytes()
+					return nil
+				}
+				asmBuf.Write(filterObjdumpBySymbols(wholeBuf.Bytes(), job.Symbols, exactSyms, prefixSyms))
+			default:
 				for i, sym := range job.Symbols {
 					if i > 0 {
 						asmBuf.WriteString("\n")
@@ -411,6 +430,129 @@ func cacheFilename(compiler, target, sourceHash, format string, simd bool, symbo
 	return filepath.Join(cacheDir, "build-"+compiler+"-"+target+"-"+sourceHash+"-"+simdSuffix+symSuffix+"."+format)
 }
 
+// splitWildcardSymbols partitions requested symbols into exact names and
+// prefix wildcards. A symbol ending in `*` (e.g. `main.*`) is a prefix match
+// with the trailing `*` stripped. The scratch ("write your own") example uses
+// this because the user-written function name is not known ahead of time.
+func splitWildcardSymbols(symbols []string) (exact, prefixes []string) {
+	for _, s := range symbols {
+		if strings.HasSuffix(s, "*") {
+			prefixes = append(prefixes, strings.TrimSuffix(s, "*"))
+		} else {
+			exact = append(exact, s)
+		}
+	}
+	return exact, prefixes
+}
+
+// filterObjdumpBySymbols keeps only the disassembly blocks whose `<name>`
+// header matches an exact name or a wildcard prefix, preserving the objdump
+// banner. objdump's --disassemble flag accepts an exact symbol only, so a
+// wildcard request dumps the whole .text and filters here.
+//
+// When nothing matches, the requested functions were inlined away (TinyGo
+// without //go:noinline folds small funcs, and main.main, into the runtime
+// entry). This mirrors the WAT path's gowrapper fallback: the absorbing
+// function on a native ELF is runtime.runMain (the WASM analogue is
+// $runtime.run$N$gowrapper), so it is shown with a clear annotation instead
+// of leaving the pane effectively empty.
+func filterObjdumpBySymbols(asm []byte, requested, exact, prefixes []string) []byte {
+	headerRe := regexp.MustCompile(`^[0-9a-f]+ <(.+)>:`)
+	exactSet := make(map[string]bool, len(exact))
+	for _, s := range exact {
+		exactSet[s] = true
+	}
+	match := func(name string) bool {
+		if exactSet[name] {
+			return true
+		}
+		for _, p := range prefixes {
+			if strings.HasPrefix(name, p) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Split objdump output into the leading banner and per-function blocks
+	// keyed by symbol name. A block runs from its `<name>:` header to the
+	// line before the next header (trailing blank dropped).
+	type block struct {
+		name string
+		text bytes.Buffer
+	}
+	var banner bytes.Buffer
+	var blocks []*block
+	byName := map[string]*block{}
+	var cur *block
+	seenHeader := false
+	for _, line := range strings.Split(string(asm), "\n") {
+		if m := headerRe.FindStringSubmatch(line); m != nil {
+			seenHeader = true
+			b := &block{name: m[1]}
+			b.text.WriteString(line)
+			b.text.WriteByte('\n')
+			blocks = append(blocks, b)
+			byName[m[1]] = b
+			cur = b
+			continue
+		}
+		if !seenHeader {
+			banner.WriteString(line) // file format / "Disassembly of section .text:"
+			banner.WriteByte('\n')
+			continue
+		}
+		if cur != nil && strings.TrimSpace(line) != "" {
+			cur.text.WriteString(line)
+			cur.text.WriteByte('\n')
+		}
+	}
+
+	var out bytes.Buffer
+	fmt.Fprintf(&out, "// Filtered to symbols: %s\n", strings.Join(requested, ", "))
+	out.WriteString("// Drop the ?symbols= query param to view the whole .text.\n")
+	out.Write(banner.Bytes())
+
+	matchedAny := false
+	for _, b := range blocks {
+		if match(b.name) {
+			matchedAny = true
+			out.WriteByte('\n')
+			out.Write(b.text.Bytes())
+		}
+	}
+	if matchedAny {
+		return out.Bytes()
+	}
+
+	// Fallback: show the function that absorbed the inlined code. Prefer
+	// runtime.runMain, then any other runtime.run* container if the build
+	// names it differently.
+	candidates := []string{"runtime.runMain"}
+	runRe := regexp.MustCompile(`^runtime\.run`)
+	for _, b := range blocks {
+		if b.name != "runtime.runMain" && runRe.MatchString(b.name) {
+			candidates = append(candidates, b.name)
+		}
+	}
+	for _, cand := range candidates {
+		if b, ok := byName[cand]; ok {
+			fmt.Fprintf(&out,
+				"\n// (symbols inlined: %s — showing %s, which contains the inlined code;\n"+
+					"//  add //go:noinline to a function to keep it as a separate symbol)\n\n",
+				strings.Join(requested, ", "), cand)
+			out.Write(b.text.Bytes())
+			return out.Bytes()
+		}
+	}
+
+	fmt.Fprintf(&out,
+		"\n// (no symbols matched %s — every requested function was inlined;\n"+
+			"//  drop ?symbols= to view the whole .text)\n",
+		strings.Join(requested, ", "))
+	return out.Bytes()
+}
+
 // filterWATBySymbols rewrites a WAT file in place, keeping only top-level
 // `(func $<sym> ...)` blocks whose name matches one of `symbols`, plus a small
 // header. Indices into the original module are preserved by name (wasm2wat
@@ -429,9 +571,12 @@ func filterWATBySymbols(watFile string, symbols []string) error {
 	if err != nil {
 		return err
 	}
-	want := make(map[string]bool, len(symbols))
-	for _, s := range symbols {
-		want["$"+s] = true
+	// A symbol ending in `*` (e.g. `main.*`) is a prefix wildcard; the
+	// scratch example uses it because the user's function name is unknown.
+	exactSyms, prefixSyms := splitWildcardSymbols(symbols)
+	wantExact := make(map[string]bool, len(exactSyms))
+	for _, s := range exactSyms {
+		wantExact["$"+s] = true
 	}
 	var out bytes.Buffer
 	fmt.Fprintf(&out, ";; Filtered to symbols: %s\n", strings.Join(symbols, ", "))
@@ -480,13 +625,55 @@ func filterWATBySymbols(watFile string, symbols []string) error {
 		return found
 	}
 
+	// allFuncNames lists every top-level `(func $name ...)` name in order,
+	// used to expand prefix wildcards against the actual module.
+	allFuncNames := func() []string {
+		var names []string
+		for _, line := range lines {
+			trimmed := strings.TrimLeft(line, " \t")
+			if !strings.HasPrefix(trimmed, "(func $") {
+				continue
+			}
+			rest := trimmed[len("(func "):]
+			end := strings.IndexAny(rest, " \t(")
+			if end < 0 {
+				end = len(rest)
+			}
+			names = append(names, rest[:end])
+		}
+		return names
+	}
+
 	// Pass 1: capture all requested symbols that are present in the WAT.
 	matched := make(map[string]bool, len(symbols))
-	for sym := range want {
+	for sym := range wantExact {
 		var block bytes.Buffer
 		if captureFuncBlock(&block, sym) {
 			matched[sym] = true
 			out.Write(block.Bytes())
+		}
+	}
+	// Expand prefix wildcards (e.g. `main.*` -> `$main.*`). wasm-opt often
+	// inlines user functions away entirely, in which case nothing matches and
+	// the prefix is treated as missing below so the gowrapper fallback fires.
+	prefixMatched := make(map[string]bool, len(prefixSyms))
+	if len(prefixSyms) > 0 {
+		for _, name := range allFuncNames() {
+			if matched[name] {
+				continue
+			}
+			for _, p := range prefixSyms {
+				if !strings.HasPrefix(name, "$"+p) {
+					continue
+				}
+				var block bytes.Buffer
+				if captureFuncBlock(&block, name) {
+					matched[name] = true
+					prefixMatched[p] = true
+					out.Write(block.Bytes())
+				}
+				break
+			}
 		}
 	}
 
@@ -496,9 +683,14 @@ func filterWATBySymbols(watFile string, symbols []string) error {
 	// $runtime.run$1$gowrapper; $main and $main.main do not appear in the
 	// final WAT after wasm-opt. Try candidates in priority order.
 	var missing []string
-	for sym := range want {
+	for sym := range wantExact {
 		if !matched[sym] {
 			missing = append(missing, sym)
+		}
+	}
+	for _, p := range prefixSyms {
+		if !prefixMatched[p] {
+			missing = append(missing, "$"+p+"*")
 		}
 	}
 

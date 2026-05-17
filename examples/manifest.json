@@ -56,7 +56,7 @@
   {
     "key": "scratch",
     "label": "Blank — write your own",
-    "symbols": ["main.Compute"],
-    "hint": "Empty starter. Replace with your own SPMD code; keep a //go:noinline func for the WASM/AVX2 tabs."
+    "symbols": ["main.*"],
+    "hint": "Empty starter. Replace with your own SPMD code; the WASM/AVX2 tabs show every main.* function you write."
   }
 ]

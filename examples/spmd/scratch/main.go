@@ -1,6 +1,8 @@
-// Blank starter — edit this file freely.
-// The //go:noinline directive below lets the WASM and AVX2 tabs isolate
-// this function's code; without it those tabs fall back to showing main.
+// Blank starter — edit this file freely. Name your SPMD functions anything:
+// the WASM and AVX2 tabs filter to every main.* function (manifest symbols
+// "main.*"), so renaming or adding functions just works. //go:noinline keeps
+// the AVX2 disassembly readable as a distinct symbol; if wasm-opt inlines a
+// function away the WASM tab falls back to the wrapper that absorbed it.
 package main
 
 import (

@@ -210,3 +210,178 @@ func TestFilterWATBySymbols_MatchedNameSharesFallbackCandidate(t *testing.T) {
 		t.Errorf("expected gowrapper body token f32x4.relaxed_madd, got:\n%s", got)
 	}
 }
+
+// syntheticWATPrefix has two main.* funcs (so a `main.*` wildcard expands to
+// both) plus an unrelated func that must be filtered out.
+const syntheticWATPrefix = `(module
+  (func $main.Foo (param i32) (result i32)
+    local.get 0
+    i32.const 1
+    i32.add)
+  (func $main.Bar (param i32) (result i32)
+    local.get 0
+    i32.const 2
+    i32.add)
+  (func $other.func (param i32)
+    drop)
+)`
+
+func TestSplitWildcardSymbols(t *testing.T) {
+	exact, prefixes := splitWildcardSymbols([]string{"main.Foo", "main.*", "x.*", "main.Bar"})
+	if strings.Join(exact, ",") != "main.Foo,main.Bar" {
+		t.Errorf("exact = %v, want [main.Foo main.Bar]", exact)
+	}
+	if strings.Join(prefixes, ",") != "main.,x." {
+		t.Errorf("prefixes = %v, want [main. x.]", prefixes)
+	}
+}
+
+// TestFilterWATBySymbols_PrefixWildcard verifies `main.*` expands to every
+// $main.* func and excludes unrelated funcs, with no fallback annotation.
+func TestFilterWATBySymbols_PrefixWildcard(t *testing.T) {
+	path := writeTempWAT(t, syntheticWATPrefix)
+
+	if err := filterWATBySymbols(path, []string{"main.*"}); err != nil {
+		t.Fatalf("filterWATBySymbols: %v", err)
+	}
+	got := readWAT(t, path)
+
+	if !strings.Contains(got, "(func $main.Foo") || !strings.Contains(got, "(func $main.Bar") {
+		t.Errorf("expected both $main.Foo and $main.Bar blocks, got:\n%s", got)
+	}
+	if strings.Contains(got, "$other.func") {
+		t.Errorf("unexpected $other.func (should be filtered by prefix), got:\n%s", got)
+	}
+	if strings.Contains(got, "inlined by wasm-opt") || strings.Contains(got, "symbol not found") {
+		t.Errorf("unexpected fallback annotation when prefix matched, got:\n%s", got)
+	}
+}
+
+// TestFilterWATBySymbols_PrefixWildcardAllInlined verifies that when wasm-opt
+// inlined every user function away (no $main.* survives — the real scratch /
+// WASM case) the `main.*` wildcard is treated as missing and the gowrapper
+// fallback fires, so the WASM tab is never blank.
+func TestFilterWATBySymbols_PrefixWildcardAllInlined(t *testing.T) {
+	path := writeTempWAT(t, syntheticWATMissing)
+
+	if err := filterWATBySymbols(path, []string{"main.*"}); err != nil {
+		t.Fatalf("filterWATBySymbols: %v", err)
+	}
+	got := readWAT(t, path)
+
+	if !strings.Contains(got, "(func $runtime.run$1$gowrapper") {
+		t.Errorf("expected gowrapper fallback when all main.* inlined, got:\n%s", got)
+	}
+	if !strings.Contains(got, "$main.*") {
+		t.Errorf("expected missing wildcard $main.* named in annotation, got:\n%s", got)
+	}
+	if !strings.Contains(got, "f32x4.relaxed_madd") {
+		t.Errorf("expected inlined body token to survive via fallback, got:\n%s", got)
+	}
+}
+
+// syntheticObjdump mimics objdump -d output: a banner, a user main.* block,
+// and a runtime block that a `main.*` wildcard must drop.
+const syntheticObjdump = `
+demo.elf:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+00000000002292b0 <main.MyKernel>:
+  2292b0:	push   rbp
+  2292b1:	vpaddd ymm0,ymm0,ymm1
+  229336:	ret
+
+0000000000201000 <runtime.scheduler>:
+  201000:	nop
+  201001:	ret
+`
+
+func TestFilterObjdumpBySymbols_PrefixWildcard(t *testing.T) {
+	out := string(filterObjdumpBySymbols([]byte(syntheticObjdump),
+		[]string{"main.*"}, nil, []string{"main."}))
+
+	if !strings.Contains(out, "<main.MyKernel>:") {
+		t.Errorf("expected main.MyKernel block kept, got:\n%s", out)
+	}
+	if !strings.Contains(out, "vpaddd ymm0") {
+		t.Errorf("expected main.MyKernel body kept, got:\n%s", out)
+	}
+	if strings.Contains(out, "runtime.scheduler") {
+		t.Errorf("expected runtime.scheduler block dropped, got:\n%s", out)
+	}
+	if !strings.Contains(out, "Disassembly of section .text:") {
+		t.Errorf("expected objdump banner preserved, got:\n%s", out)
+	}
+	if strings.Contains(out, "no symbols matched") {
+		t.Errorf("unexpected no-match note when a block matched, got:\n%s", out)
+	}
+}
+
+func TestFilterObjdumpBySymbols_NoMatch(t *testing.T) {
+	noUser := `
+demo.elf:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+0000000000201000 <runtime.scheduler>:
+  201000:	ret
+`
+	out := string(filterObjdumpBySymbols([]byte(noUser),
+		[]string{"main.*"}, nil, []string{"main."}))
+
+	if strings.Contains(out, "runtime.scheduler") {
+		t.Errorf("expected non-matching block dropped, got:\n%s", out)
+	}
+	if !strings.Contains(out, "no symbols matched") {
+		t.Errorf("expected no-match note so the pane is not blank, got:\n%s", out)
+	}
+}
+
+// TestFilterObjdumpBySymbols_RuntimeRunMainFallback covers the real reported
+// case: user code without //go:noinline is inlined entirely into
+// runtime.runMain (the native-ELF analogue of $runtime.run$N$gowrapper), so
+// no main.* symbol survives. The AVX2 pane must fall back to runtime.runMain
+// — which holds the actual vector code — instead of the bare no-match note.
+func TestFilterObjdumpBySymbols_RuntimeRunMainFallback(t *testing.T) {
+	inlinedObjdump := `
+arr.elf:     file format elf64-x86-64
+
+
+Disassembly of section .text:
+
+000000000021be90 <main>:
+  21be90:	push   rax
+  21beaa:	call   21beb3 <runtime.runMain>
+  21beb2:	ret
+
+000000000021beb3 <runtime.runMain>:
+  21beb3:	push   rbp
+  21bf01:	vpaddd ymm0,ymm0,ymm1
+  21bf30:	ret
+
+0000000000201000 <runtime.scheduler>:
+  201000:	ret
+`
+	out := string(filterObjdumpBySymbols([]byte(inlinedObjdump),
+		[]string{"main.*"}, nil, []string{"main."}))
+
+	if !strings.Contains(out, "symbols inlined: main.*") {
+		t.Errorf("expected inlined-symbols annotation, got:\n%s", out)
+	}
+	if !strings.Contains(out, "showing runtime.runMain") {
+		t.Errorf("expected fallback to runtime.runMain named, got:\n%s", out)
+	}
+	if !strings.Contains(out, "<runtime.runMain>:") || !strings.Contains(out, "vpaddd ymm0") {
+		t.Errorf("expected runtime.runMain block with vector code, got:\n%s", out)
+	}
+	if strings.Contains(out, "no symbols matched") {
+		t.Errorf("should use the fallback, not the bare no-match note, got:\n%s", out)
+	}
+	// The tiny <main> entry stub and the scheduler must not leak in.
+	if strings.Contains(out, "<runtime.scheduler>:") {
+		t.Errorf("unexpected runtime.scheduler in fallback output, got:\n%s", out)
+	}
+}
