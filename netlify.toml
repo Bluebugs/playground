@@ -24,7 +24,7 @@
 # which keeps COOP/COEP and CORS straightforward.
 [[redirects]]
   from = "/api/*"
-  to = "https://REPLACE_BEFORE_DEPLOY.invalid/api/:splat"
+  to = "https://spmd-api.ddlm.me/api/:splat"
   status = 200
   force = true
 
