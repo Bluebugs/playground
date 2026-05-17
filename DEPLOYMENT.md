@@ -242,6 +242,13 @@ Recommended initial Cloud Run settings for this workload:
 - port: `8080`
 - unauthenticated: enabled if the public frontend must call the API directly
 
+These are the values for the **first** deploy only. The running service may
+have been tuned afterwards (notably `concurrency`, which is deliberately low
+here but is a common thing to raise once real traffic behavior is known).
+Treat this list as the initial recommendation, not a record of live state — see
+"Updating an existing service" for how to read and preserve the actual running
+configuration before redeploying.
+
 If you do enable unauthenticated public access, pair it with rate limiting and
 monitoring. Otherwise, keep the service private until those controls exist.
 
@@ -309,13 +316,23 @@ gcloud auth application-default login
 gcloud config set project YOUR_PROJECT_ID
 ```
 
-### 3. Build The Container Locally
+### 3. Build The Container Locally (optional, not required for Cloud Run)
 
 ```bash
 make build
 ```
 
 This produces a local Docker image tagged `spmd-playground:latest`.
+
+`make build` is **only** needed if you want to test the image locally
+(`make run`, `make test-docker`) or push it to Docker Hub (`make push-docker`).
+It is **not** a prerequisite for a Cloud Run deploy. `make push-gcloud`
+(step 4) runs its own independent build remotely in Cloud Build from the
+`Dockerfile` and never consumes the local image produced here. The only thing
+the local and remote builds share is the `release-spmd.tar.gz` prerequisite
+(declared on both the `build` and `push-gcloud` targets), so if you only intend
+to deploy to Cloud Run you can skip straight to step 4 and avoid one redundant
+local build.
 
 ### 4. Submit The Image To Artifact Registry
 
@@ -346,13 +363,30 @@ layout.
 Use the GCP path for Cloud Run deployments unless you intentionally deploy from
 another registry.
 
+`make push-gcloud` uploads the build context (the `playground/` tree, including
+the ~300 MB `release-spmd.tar.gz`) to Cloud Build, which runs `docker build`
+**server-side** and publishes the result to Artifact Registry. It does not
+reuse any local image. Seeing a "second" Docker build start during
+`make push-gcloud` even though you already ran `make build` is expected: the
+two builds are independent (local vs remote), they just share the
+`release-spmd.tar.gz` prerequisite, which is skipped when the tarball already
+exists. If the forked Go/TinyGo submodules have not changed, the existing
+tarball is reused and the slow ~30 min toolchain rebuild does not happen.
+
 ### 5. Deploy To Cloud Run
 
-Example deployment command for the recommended 2 vCPU / 2 GiB shape:
+There are two distinct cases. Use the right one — they are **not**
+interchangeable.
+
+#### 5a. First deploy (new service)
+
+When the service does not exist yet, specify the full shape explicitly. The
+values below are the recommended starting point (see "Backend Runtime
+Settings"); adjust before first deploy if your workload differs.
 
 ```bash
 gcloud run deploy playground \
-  --image us-central1-docker.pkg.dev/YOUR_PROJECT_ID/cloud-run-source-deploy/playground:latest \
+  --image us-central1-docker.pkg.dev/YOUR_PROJECT_ID/cloud-run-source-deploy/spmd-playground:latest \
   --region us-central1 \
   --platform managed \
   --port 8080 \
@@ -364,6 +398,43 @@ gcloud run deploy playground \
   --timeout 60 \
   --allow-unauthenticated
 ```
+
+#### 5b. Updating an existing service (image swap only)
+
+`gcloud run deploy` builds the new revision **from the existing service
+configuration** and only overrides the flags you explicitly pass. Any tuning
+flag you omit is carried forward from the current revision unchanged.
+
+This has a sharp edge: re-pasting the full 5a command on an update **forces
+every listed value back to the literal in the command**. If the live service
+was tuned after the last documented change (for example concurrency raised
+beyond the `1` recommended here), passing `--concurrency 1` again silently
+reverts that production tuning. The same applies to `--cpu`, `--memory`,
+`--max-instances`, and `--timeout`.
+
+For a routine update (new image, same tuning) deploy with only the image and
+region so live settings are preserved:
+
+```bash
+gcloud run deploy playground \
+  --image us-central1-docker.pkg.dev/$GCP_PROJECT/cloud-run-source-deploy/spmd-playground:latest \
+  --region us-central1
+```
+
+Before deploying — and any time the live shape is in doubt — read the current
+configuration instead of trusting this document (the values in "Backend Runtime
+Settings" are the *initial recommendation*, not a guaranteed reflection of the
+running service):
+
+```bash
+gcloud run services describe playground --region us-central1 \
+  --format='value(
+    spec.template.spec.containerConcurrency,
+    spec.template.spec.timeoutSeconds,
+    spec.template.spec.containers[0].resources.limits)'
+```
+
+Only re-pass a tuning flag when you intend to change that specific value.
 
 After deploy, note the generated service URL. You may need it for the frontend
 update.
