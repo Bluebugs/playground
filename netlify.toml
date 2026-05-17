@@ -8,12 +8,14 @@
 #     the static layer cheap, and lets the heavy Cloud Run instance scale
 #     independently.
 #
-# Public site target: https://spmd.ddlm.me
+# Public site: https://gofor-tinygo.netlify.app (default Netlify subdomain).
+# The custom domain spmd.ddlm.me is intentionally not configured; it can be
+# added later with zero downtime if a branded URL is wanted. The /api/* rule
+# below is a same-origin rewrite, so the site works identically on either host.
 #
-# Cloud Run backend URL: set CLOUDRUN_URL after the first deploy and replace
-# the placeholder below. Until then the redirect points at the literal
-# placeholder so any unconfigured deploy fails loud rather than silently
-# falling back to a stale endpoint.
+# Cloud Run backend: reached via the Cloud Armor-protected load balancer at
+# https://spmd-api.ddlm.me (set in the redirect below). Cloud Run ingress is
+# locked to load-balancer-only, so the raw run.app URL is not reachable.
 
 [build]
   publish = "."

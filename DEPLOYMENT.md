@@ -3,8 +3,10 @@
 This document describes how to deploy the **SPMD** playground in the same
 shape as the upstream TinyGo playground:
 
-- static frontend on Netlify (public site: `https://spmd.ddlm.me`)
-- compiler backend on Google Cloud Run, fronted by Netlify via `/api/*`
+- static frontend on Netlify (public site: `https://gofor-tinygo.netlify.app`;
+  the custom domain `spmd.ddlm.me` is optional and not currently configured)
+- compiler backend on Google Cloud Run, behind a Cloud Armor-protected load
+  balancer at `https://spmd-api.ddlm.me`, reverse-proxied by Netlify via `/api/*`
 - ~4 GiB / 2-4 vCPU Cloud Run instance (SPMD TinyGo builds use more RAM than
   upstream because the forked Go GOROOT is loaded into memory)
 - local-disk cache by default; GCS optional (see "Backend Runtime Settings")
@@ -102,10 +104,9 @@ The playground has two deployable pieces:
 1. Frontend static assets served from Netlify.
 2. Backend compiler API served from Cloud Run.
 
-The frontend is not fully self-configuring. Both [dashboard.js](dashboard.js)
-and [stats/stats.js](stats/stats.js) hardcode the production API base URL for
-non-localhost environments. If the backend URL changes, those files must be
-updated before shipping the frontend.
+The frontend is self-configuring: it always calls the relative path `/api`,
+and the backend URL lives only in the `netlify.toml` rewrite rule. See
+"Frontend API URL" below.
 
 ## Required Accounts And Access
 
@@ -256,27 +257,28 @@ Cold starts are expected with `min instances = 0`. If first-request latency is
 more important than idle cost, consider `min instances = 1` and accept the fixed
 monthly baseline cost.
 
-## Frontend API URL Gotcha
+## Frontend API URL
 
-Before deploying the frontend, verify the API URL in both files:
+The frontend always calls the relative path `/api`. There is **no** hardcoded
+backend URL in `dashboard.js`, and there is no `stats/stats.js` file (an older
+revision of this document described both — that is no longer accurate).
 
-- [dashboard.js](dashboard.js)
-- [stats/stats.js](stats/stats.js)
+The only place the backend URL lives is the `[[redirects]]` rule in
+[netlify.toml](netlify.toml), which rewrites `/api/*` to the Cloud Armor-
+protected load balancer:
 
-Current pattern:
-
-```javascript
-const API_URL = location.hostname == 'localhost' ? '/api' : 'https://playground-bttoqog3vq-uc.a.run.app/api';
+```toml
+[[redirects]]
+  from = "/api/*"
+  to = "https://spmd-api.ddlm.me/api/:splat"
+  status = 200
+  force = true
 ```
 
-If your Cloud Run hostname is different, update both files first.
-
-Treat this as a blocking deployment step. If one file points at the wrong
-backend, the site will partially break in production.
-
-If you want easier future deployments, replace the hardcoded production URL with
-some deploy-time configuration mechanism before relying on this in multiple
-environments.
+To repoint the backend, change that single `to =` line and redeploy Netlify.
+Because it is a `status=200 force=true` rewrite, the browser sees a same-origin
+response, so the site behaves identically whether served on
+`gofor-tinygo.netlify.app` or a custom domain.
 
 ## Build And Deploy Backend
 
