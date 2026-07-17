@@ -8,7 +8,7 @@
   {
     "key": "hex-encode",
     "label": "Hex encode (table lookup)",
-    "symbols": ["main.Encode"],
+    "symbols": ["main.EncodeSrc"],
     "hint": "Single vpshufb / i8x16.swizzle does the entire nibble->hex map."
   },
   {
