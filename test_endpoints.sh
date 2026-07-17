@@ -72,8 +72,8 @@ done
 
 HEX_SRC="$SCRIPT_DIR/examples/spmd/hex-encode/main.go"
 if [ -f "$HEX_SRC" ]; then
-  asm_simd=$(post_src "$HEX_SRC" "$BASE_URL/api/asm?simd=true&symbols=main.Encode")
-  asm_scalar=$(post_src "$HEX_SRC" "$BASE_URL/api/asm?simd=false&symbols=main.Encode")
+  asm_simd=$(post_src "$HEX_SRC" "$BASE_URL/api/asm?simd=true&symbols=main.EncodeSrc")
+  asm_scalar=$(post_src "$HEX_SRC" "$BASE_URL/api/asm?simd=false&symbols=main.EncodeSrc")
 
   if echo "$asm_simd" | grep -q vpshufb; then
     echo "OK: hex-encode AVX2 SIMD contains vpshufb"
